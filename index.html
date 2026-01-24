@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Kitava Delivery Density</title>
+  <title>Kitava Delivery Density (threshold + size controls)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -12,23 +12,39 @@
     #controls {
       position:absolute; top:12px; left:12px; z-index:1000;
       background:white; padding:10px; border-radius:6px;
-      box-shadow:0 2px 6px rgba(0,0,0,0.2); width:360px;
+      box-shadow:0 2px 6px rgba(0,0,0,0.2); width:380px;
     }
-    textarea { width:100%; height:130px; font-size:12px; }
-    button { margin-top:6px; padding:6px 10px; }
+    textarea { width:100%; height:110px; font-size:12px; margin-top:6px; }
+    button { margin-top:8px; padding:6px 10px; }
     .legend {
       position:absolute; top:12px; right:12px; z-index:1000;
-      background:white; padding:8px; border-radius:6px;
+      background:white; padding:10px; border-radius:6px;
       box-shadow:0 1px 4px rgba(0,0,0,0.2); font-size:13px;
     }
+    .small { font-size:12px; color:#555; margin-top:6px; }
+    label { display:block; margin-top:6px; }
+    input[type=number] { width:90px; margin-left:8px; }
   </style>
 </head>
 <body>
 
 <div id="controls">
   <strong>Paste CSV (Raw) and Load</strong>
-  <textarea id="csvbox"></textarea>
-  <button onclick="loadMap()">Load Map</button>
+  <div class="small">First row must be: <code>Cx Lat,Cx Long,Store Name,# of Deliveries</code></div>
+  <textarea id="csvbox" placeholder="Paste raw CSV text (Raw view from Github)"></textarea>
+  <div style="margin-top:8px">
+    <label>Cell size (km):
+      <input id="cellSize" type="number" step="0.25" value="0.5">
+    </label>
+    <label>Min orders to color:
+      <input id="minOrders" type="number" step="1" value="10">
+    </label>
+  </div>
+  <div>
+    <button id="loadBtn">Load Map</button>
+    <button id="clearBtn">Clear</button>
+  </div>
+  <div class="small">Tip: reduce cell size for more granularity (e.g., 0.25), increase min orders to hide noisy cells.</div>
 </div>
 
 <div id="map"></div>
@@ -37,6 +53,7 @@
   <div><strong>Store</strong></div>
   <div style="color:#1f78b4">■ Albany</div>
   <div style="color:#33a02c">■ Temescal</div>
+  <div style="color:#ddd; margin-top:6px">■ Below threshold (faint)</div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -47,71 +64,103 @@
 const map = L.map('map').setView([37.87, -122.27], 12);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
-let layer;
+let layer = null;
 
-function loadMap() {
-  const csv = document.getElementById('csvbox').value.trim();
-  if (!csv) {
-    alert("Paste CSV text first");
-    return;
-  }
+document.getElementById('clearBtn').onclick = () => {
+  document.getElementById('csvbox').value = '';
+};
 
-  const parsed = Papa.parse(csv, {header:true});
+document.getElementById('loadBtn').onclick = () => {
+  const txt = document.getElementById('csvbox').value.trim();
+  if (!txt) { alert('Please paste raw CSV text first.'); return; }
+  const cellKm = parseFloat(document.getElementById('cellSize').value) || 0.5;
+  const minOrders = parseInt(document.getElementById('minOrders').value) || 10;
+  drawFromCsvText(txt, cellKm, minOrders);
+};
+
+function drawFromCsvText(csvText, cellKm, minOrders) {
+  const parsed = Papa.parse(csvText, {header:true, skipEmptyLines:true});
+  const rows = parsed.data;
+  if (!rows || rows.length === 0) { alert('No rows found in CSV.'); return; }
+
+  // build point features
   const pts = [];
-
-  parsed.data.forEach(r => {
-    const lat = parseFloat(r["Cx Lat"]);
-    const lon = parseFloat(r["Cx Long"]);
-    const store = r["Store Name"];
-    const count = parseInt(r["# of Deliveries"]) || 0;
-
+  rows.forEach(r => {
+    const lat = parseFloat(r['Cx Lat']);
+    const lon = parseFloat(r['Cx Long']);
+    const store = r['Store Name'] || '';
+    const count = parseInt(r['# of Deliveries']) || 0;
     if (isFinite(lat) && isFinite(lon)) {
       pts.push(turf.point([lon, lat], {store, count}));
     }
   });
 
-  const fc = turf.featureCollection(pts);
-  const bbox = turf.bbox(fc);
-  const grid = turf.hexGrid(bbox, 0.5, {units:"kilometers"});
+  if (pts.length === 0) { alert('No valid coordinates found.'); return; }
 
-  grid.features.forEach(hex => {
-    let albany = 0;
-    let temescal = 0;
+  const ptsFC = turf.featureCollection(pts);
+  const bbox = turf.bbox(ptsFC);
+  // pad bbox
+  const padKm = cellKm * 1.5;
+  const minLat = bbox[1], maxLat = bbox[3];
+  const avgLat = (minLat + maxLat) / 2;
+  const degPadLat = padKm / 111.0;
+  const degPadLon = padKm / (111.0 * Math.cos(avgLat * Math.PI/180));
+  const padded = [bbox[0] - degPadLon, bbox[1] - degPadLat, bbox[2] + degPadLon, bbox[3] + degPadLat];
 
-    pts.forEach(p => {
-      if (turf.booleanPointInPolygon(p, hex)) {
-        if (p.properties.store.includes("Albany")) albany += p.properties.count;
-        if (p.properties.store.includes("Temescal")) temescal += p.properties.count;
-      }
+  // hex grid
+  const grid = turf.hexGrid(padded, cellKm, {units:'kilometers'});
+
+  // aggregate per hex
+  grid.features.forEach((hex, idx) => {
+    let albany = 0, temescal = 0, other = 0;
+    // find points inside hex
+    const ptsIn = turf.pointsWithinPolygon(ptsFC, hex);
+    ptsIn.features.forEach(p => {
+      const c = p.properties.count || 0;
+      const s = p.properties.store || '';
+      if (s.includes('Albany')) albany += c;
+      else if (s.includes('Temescal')) temescal += c;
+      else other += c;
     });
-
-    hex.properties.albany = albany;
-    hex.properties.temescal = temescal;
-    hex.properties.total = albany + temescal;
-    hex.properties.winner = albany >= temescal ? "Albany" : "Temescal";
+    hex.properties = { albany, temescal, other, total: albany + temescal + other, idx };
+    // decide winner only if total >= minOrders
+    if (hex.properties.total >= minOrders) {
+      hex.properties.winner = (albany >= temescal) ? 'Albany' : 'Temescal';
+    } else {
+      hex.properties.winner = 'BelowThreshold';
+    }
   });
 
+  // compute color and draw
   if (layer) map.removeLayer(layer);
 
   layer = L.geoJSON(grid, {
-    style: f => ({
-      color:"#777",
-      weight:0.5,
-      fillOpacity:0.7,
-      fillColor: f.properties.winner === "Albany" ? "#1f78b4" : "#33a02c"
-    }),
-    onEachFeature: (f,l) => {
-      l.bindTooltip(
-        `<strong>${f.properties.winner}</strong><br/>
-         Albany: ${f.properties.albany}<br/>
-         Temescal: ${f.properties.temescal}`
-      );
+    style: f => {
+      const props = f.properties || {};
+      const winner = props.winner;
+      if (winner === 'Albany') {
+        return { color:'#666', weight:0.5, fillColor:'#1f78b4', fillOpacity:0.85 };
+      } else if (winner === 'Temescal') {
+        return { color:'#666', weight:0.5, fillColor:'#33a02c', fillOpacity:0.85 };
+      } else {
+        return { color:'#ddd', weight:0.3, fillColor:'#f7f7f7', fillOpacity:0.45 };
+      }
+    },
+    onEachFeature: (f, layer) => {
+      const p = f.properties;
+      const tip = `<strong>${p.winner}</strong><br/>
+                   Albany: ${p.albany}<br/>
+                   Temescal: ${p.temescal}<br/>
+                   Total: ${p.total}`;
+      layer.bindTooltip(tip, {sticky:true});
     }
   }).addTo(map);
 
-  map.fitBounds(layer.getBounds());
+  // fit map
+  try {
+    map.fitBounds(layer.getBounds(), {padding:[20,20]});
+  } catch(e) { /* ignore if weird */ }
 }
 </script>
-
 </body>
 </html>
