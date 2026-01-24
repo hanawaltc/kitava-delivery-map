@@ -2,155 +2,167 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Delivery Honeycomb (scrappy interactive)</title>
+  <title>Delivery Honeycomb — Paste CSV</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
   <!-- Leaflet -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-xwE/ABf4v7qk5g0n2rY6r7FH3z6Qw5v0sK8s9TQm0TY=" crossorigin=""/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <style>
-    html,body,#map { height: 100%; margin: 0; padding: 0; }
-    .legend { background: white; padding: 8px; line-height: 1.2; font-family: Arial, sans-serif; font-size: 13px; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.2);}
-    .info { position: absolute; top: 12px; right: 12px; z-index: 1000; }
+    html,body { height:100%; margin:0; padding:0; font-family: Arial, sans-serif;}
+    #map { height:100vh; width:100%; }
+    #controls {
+      position: absolute;
+      z-index: 1200;
+      left: 12px;
+      top: 12px;
+      background: white;
+      padding: 10px;
+      border-radius: 6px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+      width: 360px;
+      max-width: calc(100% - 24px);
+    }
+    #csvbox { width:100%; height:140px; font-size:12px; }
+    button { margin-top:6px; padding:6px 10px; font-size:14px; }
+    .legend { position: absolute; right: 12px; top: 12px; z-index: 1200; background:white; padding:8px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,0.15); font-size:13px;}
+    .small { font-size:12px; color:#555; margin-top:6px; }
   </style>
 </head>
 <body>
-  <div id="map"></div>
-  <div class="info">
-    <div id="legend" class="legend"></div>
+  <div id="controls">
+    <div><strong>Load deliveries CSV (paste raw text):</strong></div>
+    <div class="small">Open your CSV (Raw view), copy all text, paste here, then click <em>Load Map</em>.</div>
+    <textarea id="csvbox" placeholder="Paste raw CSV text here. First row must be: Cx Lat,Cx Long,Store Name,# of Deliveries"></textarea>
+    <div>
+      <button id="loadBtn">Load Map</button>
+      <button id="clearBtn" style="margin-left:8px">Clear</button>
+    </div>
+    <div class="small" style="margin-top:8px">Tip: keep hex cell around ~0.5 km. If it's too busy, use the small control below after load.</div>
+    <div style="margin-top:8px">
+      <label>Cell size (km): <input id="cellSize" type="number" step="0.25" value="0.5" style="width:72px"></label>
+    </div>
   </div>
 
-  <!-- Libraries: PapaParse for CSV, Turf for geoprocessing, chroma for colors, Leaflet for map -->
+  <div id="map"></div>
+  <div id="legend" class="legend" style="display:none"></div>
+
   <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
   <script src="https://unpkg.com/chroma-js@2.4.2/chroma.min.js"></script>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-o9N1j+8+QKFd1sKk3c+QG6hKef1yn1xyXQ+v9Zq6u4M=" crossorigin=""></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <script>
-  // CONFIG: adjust these as you like
-  const CSV_FILENAME = 'deliveries.csv'; // put your CSV here
-  const HEX_CELL_SIDE_KM = 0.5; // 0.5 km (500 m). Increase for coarser, decrease for finer
-  const COLOR_SCALE = ['#fff7fb','#08306b']; // low -> high
-  const MIN_VISIBLE_COUNT = 1; // min aggregated deliveries to show a colored hex
+  // map setup
+  const map = L.map('map').setView([37.67, -122.12], 12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
 
-  // Initialize map
-  const map = L.map('map').setView([37.67, -122.12], 13);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors'
-  }).addTo(map);
+  let hexLayer = L.geoJSON(null, { style: defaultStyle }).addTo(map);
+  const legendDiv = document.getElementById('legend');
 
-  const hexLayerGroup = L.geoJSON(null, {
-    style: feature => {
-      const c = feature.properties.count || 0;
-      const opacity = c > 0 ? 0.8 : 0.15;
-      const fill = c >= MIN_VISIBLE_COUNT ? chroma.scale(COLOR_SCALE).domain([0, maxCount || 1])(c).hex() : '#ffffff';
-      return {
-        color: '#888',
-        weight: c >= MIN_VISIBLE_COUNT ? 0.6 : 0.25,
-        fillColor: fill,
-        fillOpacity: opacity
-      };
-    },
-    onEachFeature: (feature, layer) => {
-      const c = feature.properties.count || 0;
-      const tooltip = `<strong>Deliveries:</strong> ${c}<br><small>Hex id: ${feature.properties.hex_id || 'n/a'}</small>`;
-      layer.bindTooltip(tooltip, {sticky: true});
-    }
-  }).addTo(map);
+  document.getElementById('clearBtn').onclick = () => {
+    document.getElementById('csvbox').value = '';
+  };
 
-  let maxCount = 0;
+  document.getElementById('loadBtn').onclick = () => {
+    const txt = document.getElementById('csvbox').value.trim();
+    if (!txt) { alert('Please paste your CSV raw text into the box.'); return; }
+    const cellKm = parseFloat(document.getElementById('cellSize').value) || 0.5;
+    loadCsvTextAndDraw(txt, cellKm);
+  };
+
+  function defaultStyle(feature) {
+    const c = feature.properties.count || 0;
+    const color = (c > 0) ? feature.properties.color : '#ffffff';
+    return { color:'#888', weight: c>0?0.6:0.25, fillColor: color, fillOpacity: c>0?0.8:0.15 };
+  }
 
   function showLegend(maxVal) {
-    const legendDiv = document.getElementById('legend');
     if (!maxVal || maxVal === 0) {
-      legendDiv.innerHTML = '<strong>Deliveries</strong><br><small>No deliveries in view.</small>';
+      legendDiv.style.display = 'block';
+      legendDiv.innerHTML = '<strong>Deliveries</strong><br><small>No deliveries found.</small>';
       return;
     }
-    // Create 5 buckets
     const steps = 5;
     const values = [];
-    for (let i=0;i<=steps;i++){
-      values.push(Math.round(i*(maxVal/steps)));
-    }
-    const scale = chroma.scale(COLOR_SCALE).domain([0, maxVal]);
+    for (let i=0;i<=steps;i++) values.push(Math.round(i*(maxVal/steps)));
+    const scale = chroma.scale(['#fff7fb','#08306b']).domain([0,maxVal]);
     let html = '<strong>Deliveries</strong><br>';
     for (let i=0;i<steps;i++){
-      const v = values[i+1];
-      const color = scale((values[i]+values[i+1])/2).hex();
-      html += `<div style="display:flex;align-items:center;"><div style="width:18px;height:14px;background:${color};margin-right:8px;border:1px solid #ddd"></div><div>${values[i+0]} &ndash; ${v}</div></div>`;
+      const v1 = values[i], v2 = values[i+1];
+      const color = scale((v1+v2)/2).hex();
+      html += `<div style="display:flex;align-items:center;"><div style="width:18px;height:14px;background:${color};margin-right:8px;border:1px solid #ddd"></div><div>${v1} – ${v2}</div></div>`;
     }
+    legendDiv.style.display = 'block';
     legendDiv.innerHTML = html;
   }
 
-  // Load CSV, convert to turf points
-  fetch(CSV_FILENAME).then(r => {
-    if (!r.ok) throw new Error('Could not fetch ' + CSV_FILENAME + '. Serve via HTTP or check filename.');
-    return r.text();
-  }).then(txt => {
-    const parsed = Papa.parse(txt, {header: true, skipEmptyLines: true});
+  function loadCsvTextAndDraw(csvText, cellKm) {
+    // parse CSV
+    const parsed = Papa.parse(csvText, {header:true, skipEmptyLines:true});
     const rows = parsed.data;
-    // convert to turf points, also collect bounds
+    // validate headers (quick)
+    const needed = ['Cx Lat','Cx Long','# of Deliveries'];
+    const headers = Object.keys(rows[0] || {});
+    for (const h of needed) {
+      if (!headers.includes(h)) {
+        alert('CSV header missing: ' + h + '. Make sure your first row is exactly: Cx Lat,Cx Long,Store Name,# of Deliveries');
+        return;
+      }
+    }
+
     const features = [];
     for (const r of rows) {
       const lat = parseFloat(r['Cx Lat']);
       const lon = parseFloat(r['Cx Long']);
       const deliveries = parseInt(r['# of Deliveries']) || 0;
       if (isFinite(lat) && isFinite(lon)) {
-        features.push(turf.point([lon, lat], {deliveries: deliveries, store: r['Store Name'] || ''}));
+        features.push(turf.point([lon, lat], {deliveries: deliveries}));
       }
     }
-    if (features.length === 0) {
-      alert('No valid points found in CSV. Ensure headers include Cx Lat,Cx Long,# of Deliveries');
-      return;
-    }
-    const pointsFC = turf.featureCollection(features);
+    if (features.length === 0) { alert('No valid coordinates found.'); return; }
 
-    // compute bbox and slightly pad
+    const pointsFC = turf.featureCollection(features);
     const bbox = turf.bbox(pointsFC);
-    // pad bbox by 1 cell side
-    const padKM = HEX_CELL_SIDE_KM * 1.5;
-    // turf.buffer works with polygons; simpler: expand bbox coordinates by degrees using approximate conversion:
-    // We'll compute pad in degrees approximately: 1 degree lat ~111 km. For lon use cos(avg lat).
+    // pad bbox
+    const padKm = cellKm * 1.5;
     const minLat = bbox[1], maxLat = bbox[3];
     const avgLat = (minLat + maxLat) / 2;
-    const degPadLat = padKM / 111.0;
-    const degPadLon = padKM / (111.0 * Math.cos(avgLat * Math.PI/180));
+    const degPadLat = padKm / 111.0;
+    const degPadLon = padKm / (111.0 * Math.cos(avgLat * Math.PI/180));
     const padded = [bbox[0] - degPadLon, bbox[1] - degPadLat, bbox[2] + degPadLon, bbox[3] + degPadLat];
 
     // create hex grid
-    const hexGrid = turf.hexGrid(padded, HEX_CELL_SIDE_KM, {units: 'kilometers'});
-
-    // For each hex, sum deliveries of contained points
+    const hexGrid = turf.hexGrid(padded, cellKm, {units:'kilometers'});
     const hexFeatures = hexGrid.features.map((hexFeat, i) => {
-      // turf.pointsWithinPolygon returns features inside
       const pts = turf.pointsWithinPolygon(pointsFC, hexFeat);
       let total = 0;
       for (const p of pts.features) total += (p.properties.deliveries || 0);
       hexFeat.properties.count = total;
-      // add an id
-      hexFeat.properties.hex_id = 'hex-' + i;
+      hexFeat.properties.hex_id = 'h' + i;
       return hexFeat;
     });
 
-    // compute max for color scaling
-    maxCount = Math.max(...hexFeatures.map(h => h.properties.count || 0));
-    // filter out empty if you want; but keep them faint for context
-    const hexFC = turf.featureCollection(hexFeatures);
+    const maxCount = Math.max(...hexFeatures.map(h=>h.properties.count||0));
+    const scale = chroma.scale(['#fff7fb','#08306b']).domain([0, maxCount || 1]);
+    for (const h of hexFeatures) {
+      h.properties.color = (h.properties.count>0) ? scale(h.properties.count).hex() : '#ffffff';
+    }
 
-    // add to map
-    hexLayerGroup.addData(hexFC);
+    // draw
+    if (hexLayer) map.removeLayer(hexLayer);
+    hexLayer = L.geoJSON(turf.featureCollection(hexFeatures), {
+      style: defaultStyle,
+      onEachFeature: (f, layer) => {
+        const c = f.properties.count || 0;
+        layer.bindTooltip('<strong>Deliveries:</strong> ' + c + '<br><small>Hex: ' + f.properties.hex_id + '</small>', {sticky:true});
+      }
+    }).addTo(map);
 
-    // fit to bounds
-    const allBounds = turf.bbox(hexFC);
-    map.fitBounds([[allBounds[1], allBounds[0]], [allBounds[3], allBounds[2]]], {padding: [20,20]});
+    // fit
+    const allBounds = turf.bbox(turf.featureCollection(hexFeatures));
+    map.fitBounds([[allBounds[1], allBounds[0]], [allBounds[3], allBounds[2]]], {padding:[20,20]});
 
     showLegend(maxCount);
-  }).catch(err => {
-    console.error(err);
-    alert('Error loading CSV: ' + err.message + '. If opening locally, serve via HTTP (GitHub Pages or simple local server).');
-  });
-
+  }
   </script>
 </body>
 </html>
