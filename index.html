@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Kitava Delivery Density (threshold + size controls)</title>
+  <title>Kitava Delivery Density — Volume-scaled</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -12,18 +12,20 @@
     #controls {
       position:absolute; top:12px; left:12px; z-index:1000;
       background:white; padding:10px; border-radius:6px;
-      box-shadow:0 2px 6px rgba(0,0,0,0.2); width:380px;
+      box-shadow:0 2px 6px rgba(0,0,0,0.18); width:380px;
     }
-    textarea { width:100%; height:110px; font-size:12px; margin-top:6px; }
+    textarea { width:100%; height:110px; font-size:12px; }
     button { margin-top:8px; padding:6px 10px; }
     .legend {
       position:absolute; top:12px; right:12px; z-index:1000;
       background:white; padding:10px; border-radius:6px;
-      box-shadow:0 1px 4px rgba(0,0,0,0.2); font-size:13px;
+      box-shadow:0 1px 4px rgba(0,0,0,0.15); font-size:13px;
     }
-    .small { font-size:12px; color:#555; margin-top:6px; }
+    .legend .row { display:flex; align-items:center; margin-top:6px; }
+    .legend .swatch { width:24px; height:14px; margin-right:8px; border:1px solid #ddd; }
     label { display:block; margin-top:6px; }
     input[type=number] { width:90px; margin-left:8px; }
+    .small { font-size:12px; color:#555; margin-top:6px; }
   </style>
 </head>
 <body>
@@ -31,54 +33,53 @@
 <div id="controls">
   <strong>Paste CSV (Raw) and Load</strong>
   <div class="small">First row must be: <code>Cx Lat,Cx Long,Store Name,# of Deliveries</code></div>
-  <textarea id="csvbox" placeholder="Paste raw CSV text (Raw view from Github)"></textarea>
+  <textarea id="csvbox" placeholder="Paste raw CSV text (Raw view from GitHub)"></textarea>
+
+  <label>Cell size (km):
+    <input id="cellSize" type="number" step="0.25" value="0.4">
+  </label>
+  <label>Min orders to color:
+    <input id="minOrders" type="number" step="1" value="10">
+  </label>
+
   <div style="margin-top:8px">
-    <label>Cell size (km):
-      <input id="cellSize" type="number" step="0.25" value="0.5">
-    </label>
-    <label>Min orders to color:
-      <input id="minOrders" type="number" step="1" value="10">
-    </label>
-  </div>
-  <div>
     <button id="loadBtn">Load Map</button>
     <button id="clearBtn">Clear</button>
   </div>
-  <div class="small">Tip: reduce cell size for more granularity (e.g., 0.25), increase min orders to hide noisy cells.</div>
+  <div class="small">Tip: decrease cell size (0.25) for more granularity; increase min orders to hide low-volume noise.</div>
 </div>
 
 <div id="map"></div>
 
-<div class="legend">
-  <div><strong>Store</strong></div>
-  <div style="color:#1f78b4">■ Albany</div>
-  <div style="color:#33a02c">■ Temescal</div>
-  <div style="color:#ddd; margin-top:6px">■ Below threshold (faint)</div>
+<div id="legend" class="legend" style="display:none">
+  <div><strong>Volume (per hex)</strong></div>
+  <div style="margin-top:8px"><strong>Albany</strong></div>
+  <div id="albLegend"></div>
+  <div style="margin-top:8px"><strong>Temescal</strong></div>
+  <div id="temLegend"></div>
+  <div style="margin-top:8px; color:#777" id="belowText">Gray = below threshold</div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
 <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+<script src="https://unpkg.com/chroma-js@2.4.2/chroma.min.js"></script>
 
 <script>
 const map = L.map('map').setView([37.87, -122.27], 12);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-
 let layer = null;
 
-document.getElementById('clearBtn').onclick = () => {
-  document.getElementById('csvbox').value = '';
-};
-
+document.getElementById('clearBtn').onclick = () => document.getElementById('csvbox').value = '';
 document.getElementById('loadBtn').onclick = () => {
   const txt = document.getElementById('csvbox').value.trim();
-  if (!txt) { alert('Please paste raw CSV text first.'); return; }
-  const cellKm = parseFloat(document.getElementById('cellSize').value) || 0.5;
+  if (!txt) { alert('Please paste the raw CSV text first.'); return; }
+  const cellKm = parseFloat(document.getElementById('cellSize').value) || 0.4;
   const minOrders = parseInt(document.getElementById('minOrders').value) || 10;
-  drawFromCsvText(txt, cellKm, minOrders);
+  draw(csvText=txt, cellKm, minOrders);
 };
 
-function drawFromCsvText(csvText, cellKm, minOrders) {
+function draw(csvText, cellKm, minOrders) {
   const parsed = Papa.parse(csvText, {header:true, skipEmptyLines:true});
   const rows = parsed.data;
   if (!rows || rows.length === 0) { alert('No rows found in CSV.'); return; }
@@ -90,16 +91,14 @@ function drawFromCsvText(csvText, cellKm, minOrders) {
     const lon = parseFloat(r['Cx Long']);
     const store = r['Store Name'] || '';
     const count = parseInt(r['# of Deliveries']) || 0;
-    if (isFinite(lat) && isFinite(lon)) {
-      pts.push(turf.point([lon, lat], {store, count}));
-    }
+    if (isFinite(lat) && isFinite(lon)) pts.push(turf.point([lon, lat], {store, count}));
   });
 
   if (pts.length === 0) { alert('No valid coordinates found.'); return; }
-
   const ptsFC = turf.featureCollection(pts);
   const bbox = turf.bbox(ptsFC);
-  // pad bbox
+
+  // pad bbox slightly (degrees approximation)
   const padKm = cellKm * 1.5;
   const minLat = bbox[1], maxLat = bbox[3];
   const avgLat = (minLat + maxLat) / 2;
@@ -107,13 +106,13 @@ function drawFromCsvText(csvText, cellKm, minOrders) {
   const degPadLon = padKm / (111.0 * Math.cos(avgLat * Math.PI/180));
   const padded = [bbox[0] - degPadLon, bbox[1] - degPadLat, bbox[2] + degPadLon, bbox[3] + degPadLat];
 
-  // hex grid
+  // create grid
   const grid = turf.hexGrid(padded, cellKm, {units:'kilometers'});
 
-  // aggregate per hex
-  grid.features.forEach((hex, idx) => {
+  // aggregate counts and detect winner, collect totals
+  const totals = [];
+  grid.features.forEach(hex => {
     let albany = 0, temescal = 0, other = 0;
-    // find points inside hex
     const ptsIn = turf.pointsWithinPolygon(ptsFC, hex);
     ptsIn.features.forEach(p => {
       const c = p.properties.count || 0;
@@ -122,45 +121,102 @@ function drawFromCsvText(csvText, cellKm, minOrders) {
       else if (s.includes('Temescal')) temescal += c;
       else other += c;
     });
-    hex.properties = { albany, temescal, other, total: albany + temescal + other, idx };
-    // decide winner only if total >= minOrders
-    if (hex.properties.total >= minOrders) {
-      hex.properties.winner = (albany >= temescal) ? 'Albany' : 'Temescal';
+    const total = albany + temescal + other;
+    hex.properties = { albany, temescal, other, total };
+    totals.push(total);
+  });
+
+  const maxTotal = Math.max(...totals, 0);
+  const minTotal = Math.min(...totals.filter(v=>v>0), 0) || 0;
+
+  // build color scales using chroma for each store from light->base
+  const albBase = '#1f78b4'; // blue
+  const temBase = '#33a02c'; // green
+  const albScale = chroma.scale([chroma(albBase).brighten(2).hex(), albBase]).domain([minTotal, maxTotal]);
+  const temScale = chroma.scale([chroma(temBase).brighten(2).hex(), temBase]).domain([minTotal, maxTotal]);
+
+  // apply properties (winner and color) per hex
+  grid.features.forEach(hex => {
+    const a = hex.properties.albany || 0;
+    const t = hex.properties.temescal || 0;
+    const total = hex.properties.total || 0;
+    if (total >= minOrders) {
+      const winner = a >= t ? 'Albany' : 'Temescal';
+      hex.properties.winner = winner;
+      // compute color by total deliveries (use maxTotal domain)
+      const value = total;
+      const color = (winner === 'Albany') ? albScale(value).hex() : temScale(value).hex();
+      hex.properties.fill = color;
+      hex.properties.opacity = 0.6; // consistent semi-transparency
     } else {
       hex.properties.winner = 'BelowThreshold';
+      hex.properties.fill = '#f2f2f2';
+      hex.properties.opacity = 0.25;
     }
   });
 
-  // compute color and draw
+  // draw on map
   if (layer) map.removeLayer(layer);
-
   layer = L.geoJSON(grid, {
-    style: f => {
-      const props = f.properties || {};
-      const winner = props.winner;
-      if (winner === 'Albany') {
-        return { color:'#666', weight:0.5, fillColor:'#1f78b4', fillOpacity:0.85 };
-      } else if (winner === 'Temescal') {
-        return { color:'#666', weight:0.5, fillColor:'#33a02c', fillOpacity:0.85 };
-      } else {
-        return { color:'#ddd', weight:0.3, fillColor:'#f7f7f7', fillOpacity:0.45 };
-      }
-    },
-    onEachFeature: (f, layer) => {
+    style: f => ({
+      color: '#666',
+      weight: 0.6,
+      fillColor: f.properties.fill,
+      fillOpacity: f.properties.opacity
+    }),
+    onEachFeature: (f, l) => {
       const p = f.properties;
-      const tip = `<strong>${p.winner}</strong><br/>
-                   Albany: ${p.albany}<br/>
-                   Temescal: ${p.temescal}<br/>
-                   Total: ${p.total}`;
-      layer.bindTooltip(tip, {sticky:true});
+      const tooltip = `<strong>${p.winner}</strong><br/>Albany: ${p.albany}<br/>Temescal: ${p.temescal}<br/>Total: ${p.total}`;
+      l.bindTooltip(tooltip, {sticky:true});
     }
   }).addTo(map);
 
-  // fit map
-  try {
-    map.fitBounds(layer.getBounds(), {padding:[20,20]});
-  } catch(e) { /* ignore if weird */ }
+  // fit
+  try { map.fitBounds(layer.getBounds(), {padding:[20,20]}); } catch(e){}
+
+  // build legend buckets (5)
+  buildLegend(minOrders, minTotal, maxTotal, albScale, temScale);
 }
+
+function buildLegend(minOrders, minTotal, maxTotal, albScale, temScale) {
+  const leg = document.getElementById('legend');
+  const albDiv = document.getElementById('albLegend');
+  const temDiv = document.getElementById('temLegend');
+
+  if (!maxTotal || maxTotal <= 0) {
+    leg.style.display = 'none';
+    return;
+  }
+  leg.style.display = 'block';
+  albDiv.innerHTML = '';
+  temDiv.innerHTML = '';
+
+  const steps = 5;
+  // Create evenly spaced numeric buckets from 1..maxTotal
+  const vals = [];
+  for (let i=0;i<=steps;i++) vals.push(Math.round(i*(maxTotal/steps)));
+
+  for (let i=0;i<steps;i++) {
+    const from = vals[i] + (i===0?0:1);
+    const to = vals[i+1];
+    const mid = Math.round((from + to) / 2);
+    const albColor = albScale(mid).hex();
+    const temColor = temScale(mid).hex();
+    const rowA = document.createElement('div'); rowA.className='row';
+    const swA = document.createElement('div'); swA.className='swatch'; swA.style.background = albColor;
+    rowA.appendChild(swA); rowA.appendChild(document.createTextNode(from + ' – ' + to));
+    albDiv.appendChild(rowA);
+
+    const rowT = document.createElement('div'); rowT.className='row';
+    const swT = document.createElement('div'); swT.className='swatch'; swT.style.background = temColor;
+    rowT.appendChild(swT); rowT.appendChild(document.createTextNode(from + ' – ' + to));
+    temDiv.appendChild(rowT);
+  }
+
+  // below-threshold note
+  document.getElementById('belowText').innerText = 'Gray = below threshold (<' + minOrders + ' orders)';
+}
+
 </script>
 </body>
 </html>
