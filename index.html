@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Kitava Delivery Density — Volume-scaled</title>
+  <title>Kitava Delivery Density — Volume-scaled (clean view)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -57,7 +57,7 @@
   <div id="albLegend"></div>
   <div style="margin-top:8px"><strong>Temescal</strong></div>
   <div id="temLegend"></div>
-  <div style="margin-top:8px; color:#777" id="belowText">Gray = below threshold</div>
+  <div style="margin-top:8px; color:#777" id="belowText">Outline = below threshold</div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -143,27 +143,42 @@ function draw(csvText, cellKm, minOrders) {
     if (total >= minOrders) {
       const winner = a >= t ? 'Albany' : 'Temescal';
       hex.properties.winner = winner;
-      // compute color by total deliveries (use maxTotal domain)
       const value = total;
       const color = (winner === 'Albany') ? albScale(value).hex() : temScale(value).hex();
       hex.properties.fill = color;
-      hex.properties.opacity = 0.6; // consistent semi-transparency
+      // keep a moderate fill opacity for see-through feel; we won't change opacity per hex here
+      hex.properties.opacity = 0.65;
     } else {
       hex.properties.winner = 'BelowThreshold';
-      hex.properties.fill = '#f2f2f2';
-      hex.properties.opacity = 0.25;
+      // outline-only: transparent fill, light stroke
+      hex.properties.fill = 'transparent';
+      hex.properties.opacity = 0;
     }
   });
 
   // draw on map
   if (layer) map.removeLayer(layer);
   layer = L.geoJSON(grid, {
-    style: f => ({
-      color: '#666',
-      weight: 0.6,
-      fillColor: f.properties.fill,
-      fillOpacity: f.properties.opacity
-    }),
+    style: f => {
+      const p = f.properties;
+      if (p.winner === 'Albany' || p.winner === 'Temescal') {
+        return {
+          color: '#444',
+          weight: 0.6,
+          fillColor: p.fill,
+          fillOpacity: p.opacity
+        };
+      } else {
+        // below threshold: no fill, faint outline
+        return {
+          color: '#bbb',
+          weight: 0.8,
+          fillColor: 'transparent',
+          fillOpacity: 0,
+          dashArray: '2,2'
+        };
+      }
+    },
     onEachFeature: (f, l) => {
       const p = f.properties;
       const tooltip = `<strong>${p.winner}</strong><br/>Albany: ${p.albany}<br/>Temescal: ${p.temescal}<br/>Total: ${p.total}`;
@@ -214,7 +229,7 @@ function buildLegend(minOrders, minTotal, maxTotal, albScale, temScale) {
   }
 
   // below-threshold note
-  document.getElementById('belowText').innerText = 'Gray = below threshold (<' + minOrders + ' orders)';
+  document.getElementById('belowText').innerText = 'Outline = below threshold (<' + minOrders + ' orders)';
 }
 
 </script>
