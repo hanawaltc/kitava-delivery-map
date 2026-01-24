@@ -2,34 +2,194 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Kitava Delivery Density</title>
+  <title>Kitava Delivery Density (debug-friendly)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <style>
-    html, body { height: 100%; margin: 0; font-family: Arial, sans-serif; }
-    #map { height: 100vh; }
+    html,body{height:100%;margin:0;font-family:Arial,Helvetica,sans-serif}
+    #map{height:100vh}
+    .msg {
+      position: absolute; left:12px; top:12px; z-index:1500;
+      background: rgba(255,255,255,0.95); padding:10px; border-radius:6px; box-shadow:0 2px 6px rgba(0,0,0,0.2);
+      max-width:420px; font-size:13px;
+    }
+    .error { color: #900; font-weight:700; margin-top:6px; }
+    .small { color:#444; margin-top:6px; font-size:12px; }
+    .legend { position:absolute; right:12px; top:12px; z-index:1200; background:white;padding:10px;border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,0.15); display:none; }
+    .legend .row{display:flex;align-items:center;margin-top:6px}
+    .legend .swatch{width:24px;height:14px;margin-right:8px;border:1px solid #ddd}
+    a.inline { color: #1a73e8; text-decoration:none }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
 
-    .legend {
-      position: absolute;
-      top: 12px;
-      right: 12px;
-      background: white;
-      padding: 10px;
-      border-radius: 6px;
-      box-shadow: 0 1px 4px rgba(0,0,0,0.15);
-      font-size: 13px;
-      z-index: 1000;
+  <div id="status" class="msg">
+    <div><strong>Map status</strong></div>
+    <div id="statetext" class="small">Loading…</div>
+    <div id="err" class="error" style="display:none"></div>
+    <div class="small" id="help" style="margin-top:8px;display:none">
+      Common fixes: (1) Ensure the file is named <code>index.html</code> in the repo root, (2) force-refresh the page (Cmd/Ctrl+Shift+R), (3) if blank show me the first red console error.
+    </div>
+  </div>
+
+  <div id="legend" class="legend">
+    <strong>Orders per area</strong>
+    <div style="margin-top:8px"><strong>Albany</strong></div>
+    <div id="albLegend"></div>
+    <div style="margin-top:8px"><strong>Temescal</strong></div>
+    <div id="temLegend"></div>
+    <div style="margin-top:8px;color:#777">Dashed outline = &lt; 10 orders</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+  <script src="https://unpkg.com/chroma-js@2.4.2/chroma.min.js"></script>
+
+  <script>
+  // ====== EMBEDDED CSV (if you have a different CSV, replace this block before uploading) ======
+  const CSV_TEXT = `Cx Lat,Cx Long,Store Name,# of Deliveries
+37.665676,-122.118576,Kitava (Temescal),2
+37.667503,-122.125755,Kitava (Temescal),3
+37.670811,-122.130400,Kitava (Temescal),3
+37.675147,-122.145433,Kitava (Temescal),2
+37.675323,-122.131510,Kitava (Temescal),2
+37.889847,-122.297121,Kitava (Albany),4
+37.891112,-122.301402,Kitava (Albany),3
+37.887531,-122.293842,Kitava (Albany),2
+37.892874,-122.304993,Kitava (Albany),5`;
+  // ============================================================================================
+
+  const CELL_KM = 0.35;
+  const MIN_ORDERS = 10;
+
+  const map = L.map('map').setView([37.87,-122.27],12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+  const statText = document.getElementById('statetext');
+  const errBox = document.getElementById('err');
+  const helpBox = document.getElementById('help');
+
+  function showError(msg) {
+    errBox.style.display = 'block';
+    errBox.textContent = msg;
+    helpBox.style.display = 'block';
+    statText.textContent = 'Error';
+  }
+
+  function debugLog(e) {
+    console.error(e);
+    showError(String(e && e.message ? e.message : e));
+  }
+
+  try {
+    // small runtime safeguard: check CSV_TEXT exists
+    if (!CSV_TEXT || CSV_TEXT.trim().length < 10) {
+      throw new Error('No CSV data embedded. Make sure CSV_TEXT is present in the file.');
+    }
+    statText.textContent = 'Parsing CSV…';
+
+    const parsed = Papa.parse(CSV_TEXT, { header: true, skipEmptyLines: true });
+    if (!parsed || !parsed.data || parsed.data.length === 0) {
+      throw new Error('CSV parsed but contains no rows. Check header names and content.');
     }
 
-    .legend .row {
-      display: flex;
-      align-items: center;
-      margin-top: 6px;
+    const pts = [];
+    parsed.data.forEach(r => {
+      const lat = parseFloat(r['Cx Lat']);
+      const lon = parseFloat(r['Cx Long']);
+      const store = r['Store Name'] || '';
+      const count = parseInt(r['# of Deliveries']) || 0;
+      if (isFinite(lat) && isFinite(lon)) pts.push(turf.point([lon, lat], {store, count}));
+    });
+
+    if (pts.length === 0) throw new Error('No valid coordinates found in CSV.');
+
+    statText.textContent = 'Building hex grid…';
+
+    const ptsFC = turf.featureCollection(pts);
+    const bbox = turf.bbox(ptsFC);
+    const padKm = CELL_KM * 1.5;
+    const avgLat = (bbox[1] + bbox[3]) / 2;
+    const padded = [
+      bbox[0] - padKm / (111 * Math.cos(avgLat * Math.PI / 180)),
+      bbox[1] - padKm / 111,
+      bbox[2] + padKm / (111 * Math.cos(avgLat * Math.PI / 180)),
+      bbox[3] + padKm / 111
+    ];
+
+    const grid = turf.hexGrid(padded, CELL_KM, { units: 'kilometers' });
+
+    const totals = [];
+    grid.features.forEach(hex => {
+      let albany = 0, temescal = 0;
+      const inside = turf.pointsWithinPolygon(ptsFC, hex);
+      inside.features.forEach(p => {
+        const c = p.properties.count || 0;
+        const s = p.properties.store || '';
+        if (s.includes('Albany')) albany += c;
+        else if (s.includes('Temescal')) temescal += c;
+      });
+      hex.properties = { albany, temescal, total: albany + temescal };
+      totals.push(hex.properties.total);
+    });
+
+    const maxTotal = Math.max(...totals, 0);
+    const minTotal = Math.min(...totals.filter(v=>v>0), 0) || 0;
+    const albScale = chroma.scale(['#c6dbef','#1f78b4']).domain([minTotal, maxTotal]);
+    const temScale = chroma.scale(['#c7e9c0','#33a02c']).domain([minTotal, maxTotal]);
+
+    grid.features.forEach(hex => {
+      const { albany, temescal, total } = hex.properties;
+      if (total >= MIN_ORDERS) {
+        hex.properties.winner = albany >= temescal ? 'Albany' : 'Temescal';
+        hex.properties.color = hex.properties.winner === 'Albany' ? albScale(total).hex() : temScale(total).hex();
+      } else {
+        hex.properties.winner = 'Low';
+      }
+    });
+
+    statText.textContent = 'Rendering map…';
+
+    const layer = L.geoJSON(grid, {
+      style: f => {
+        if (f.properties.winner === 'Low') {
+          return { color:'#bbb', weight:0.8, fillOpacity:0, dashArray:'2,2' };
+        }
+        return { color:'#444', weight:0.6, fillColor:f.properties.color, fillOpacity:0.65 };
+      },
+      onEachFeature: (f, l) => {
+        l.bindTooltip(`<strong>${f.properties.winner}</strong><br>Albany: ${f.properties.albany}<br>Temescal: ${f.properties.temescal}<br>Total: ${f.properties.total}`, {sticky:true});
+      }
+    }).addTo(map);
+
+    try { map.fitBounds(layer.getBounds(), {padding:[20,20]}); } catch(e){}
+
+    statText.textContent = 'Map ready';
+    document.getElementById('legend').style.display = 'block';
+    // build simple legend
+    const alb = document.getElementById('albLegend'), tem = document.getElementById('temLegend');
+    alb.innerHTML = ''; tem.innerHTML = '';
+    const steps = 5;
+    for (let i=1;i<=steps;i++){
+      const v = Math.round((i/steps)*maxTotal);
+      const aSw = document.createElement('div'); aSw.className='row';
+      const aBox = document.createElement('div'); aBox.className='swatch'; aBox.style.background = albScale(v).hex();
+      aSw.appendChild(aBox); aSw.appendChild(document.createTextNode(v + ' orders'));
+      alb.appendChild(aSw);
+      const tSw = document.createElement('div'); tSw.className='row';
+      const tBox = document.createElement('div'); tBox.className='swatch'; tBox.style.background = temScale(v).hex();
+      tSw.appendChild(tBox); tSw.appendChild(document.createTextNode(v + ' orders'));
+      tem.appendChild(tSw);
     }
 
-    .legend .swatch {
-      width: 24px;
-      height: 14px;
-      margin-right: 8px;
-      border: 1px so
+  } catch (e) {
+    debugLog(e);
+  }
+  // show the help box after load attempt
+  helpBox.style.display = 'block';
+  statText.textContent = 'If map is blank, try force-refresh or open console and paste the first red error here.';
+  </script>
+</body>
+</html>
