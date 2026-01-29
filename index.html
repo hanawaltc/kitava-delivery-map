@@ -2,46 +2,45 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Kitava Delivery Density</title>
+  <title>Kitava Delivery Density — debug-friendly</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <style>
     html,body{height:100%;margin:0;font-family:Arial,Helvetica,sans-serif}
     #map{height:100vh}
-
     .legend{
       position:absolute;right:12px;top:12px;z-index:1200;
       background:white;padding:10px;border-radius:6px;
       box-shadow:0 1px 4px rgba(0,0,0,0.15);
-      font-size:13px
+      font-size:13px;min-width:180px
     }
     .legend .row{display:flex;align-items:center;margin-top:6px}
-    .legend .swatch{
-      width:24px;height:14px;margin-right:8px;
-      border:1px solid #ddd
-    }
+    .legend .swatch{width:24px;height:14px;margin-right:8px;border:1px solid #ddd}
     .legend .note{margin-top:8px;color:#666;font-size:12px}
+    .overlayMsg{
+      position:absolute;left:12px;bottom:12px;z-index:1300;
+      background:rgba(255,255,255,0.95);padding:10px;border-radius:6px;
+      box-shadow:0 1px 6px rgba(0,0,0,0.12);font-size:13px;color:#333
+    }
   </style>
 </head>
 <body>
 
 <div id="map"></div>
 
-<div id="legend" class="legend">
+<div id="legend" class="legend" aria-hidden="false">
   <strong>Orders per area</strong>
-
   <div style="margin-top:8px"><strong>Albany</strong></div>
   <div id="albLegend"></div>
-
   <div style="margin-top:8px"><strong>Temescal</strong></div>
   <div id="temLegend"></div>
-
   <div class="note">
     Very light = 1–4 orders<br>
     Darker = higher volume
   </div>
 </div>
+
+<div id="overlayMsg" class="overlayMsg" style="display:none"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
@@ -49,121 +48,149 @@
 <script src="https://unpkg.com/chroma-js@2.4.2/chroma.min.js"></script>
 
 <script>
-// =====================
-// EMBEDDED CSV (unchanged)
-// =====================
+/*
+  IMPORTANT:
+  Replace the text inside CSV_TEXT with your full CSV content.
+  The CSV must contain these headers exactly: Cx Lat,Cx Long,Store Name,# of Deliveries
+  Example CSV row:
+  37.88,-122.30,Albany Diner,3
+*/
 const CSV_TEXT = `Cx Lat,Cx Long,Store Name,# of Deliveries
-${/* keep your full CSV exactly as-is here */''}`;
+<< PASTE CSV HERE >>`;
 
-// =====================
 // CONFIG
-// =====================
 const CELL_KM = 0.35;
 const FAINT_THRESHOLD = 4; // 1–4 orders = very light
 const COLOR_THRESHOLD = 5; // 5+ orders = normal color
 
-// =====================
 // MAP
-// =====================
 const map = L.map('map').setView([37.87,-122.27],12);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-  attribution:'© OpenStreetMap'
+  attribution:'© OpenStreetMap contributors'
 }).addTo(map);
 
-// =====================
 // PARSE CSV
-// =====================
 const parsed = Papa.parse(CSV_TEXT, {header:true, skipEmptyLines:true});
+console.log('CSV parsed rows:', parsed.data.length);
 const pts = [];
 
-parsed.data.forEach(r=>{
+parsed.data.forEach((r,i)=>{
   const lat = parseFloat(r['Cx Lat']);
   const lon = parseFloat(r['Cx Long']);
-  const store = r['Store Name'] || '';
+  const store = (r['Store Name'] || '').toString();
   const count = parseInt(r['# of Deliveries']) || 0;
   if (isFinite(lat) && isFinite(lon)){
     pts.push(turf.point([lon,lat],{store,count}));
+  } else {
+    // helpful debug for malformed rows
+    if ((r['Cx Lat'] || r['Cx Long'] || r['Store Name'] || r['# of Deliveries'])) {
+      console.warn('Skipping malformed CSV row', i, r);
+    }
   }
 });
 
-const ptsFC = turf.featureCollection(pts);
-const bbox = turf.bbox(ptsFC);
-const padKm = CELL_KM * 1.5;
-const avgLat = (bbox[1]+bbox[3])/2;
+if (pts.length === 0) {
+  // show a friendly overlay and stop further processing
+  const msg = document.getElementById('overlayMsg');
+  msg.style.display = 'block';
+  msg.innerHTML = `<strong>No valid points found.</strong><br>
+    Please paste a CSV into the CSV_TEXT variable with headers:
+    <code>Cx Lat,Cx Long,Store Name,# of Deliveries</code>.
+    (Check console for malformed rows.)`;
+  console.warn('No valid point features were created from CSV. Parsed rows:', parsed.data.length);
+  // still center a reasonable view (SF Bay Area) so user sees map
+  map.setView([37.87,-122.27],11);
+  // build empty legend placeholders
+  document.getElementById('albLegend').innerHTML = '<div style="color:#666;margin-top:6px">No data</div>';
+  document.getElementById('temLegend').innerHTML = '<div style="color:#666;margin-top:6px">No data</div>';
+  throw new Error('No valid points to render. Paste CSV into CSV_TEXT.');
+}
 
+// continue with valid points
+const ptsFC = turf.featureCollection(pts);
+
+// compute bbox and small padding
+const bbox = turf.bbox(ptsFC); // [minX,minY,maxX,maxY]
+console.log('Computed bbox:', bbox);
+const avgLat = (bbox[1] + bbox[3]) / 2;
+const padKm = CELL_KM * 1.5;
 const padded = [
-  bbox[0]-padKm/(111*Math.cos(avgLat*Math.PI/180)),
-  bbox[1]-padKm/111,
-  bbox[2]+padKm/(111*Math.cos(avgLat*Math.PI/180)),
-  bbox[3]+padKm/111
+  bbox[0] - padKm/(111*Math.cos(avgLat*Math.PI/180)),
+  bbox[1] - padKm/111,
+  bbox[2] + padKm/(111*Math.cos(avgLat*Math.PI/180)),
+  bbox[3] + padKm/111
 ];
 
+// create hex grid
 const grid = turf.hexGrid(padded, CELL_KM, {units:'kilometers'});
+console.log('Hex grid created, hex count:', grid.features.length);
 
-// =====================
 // AGGREGATE
-// =====================
 const totals = [];
-
 grid.features.forEach(hex=>{
   let albany=0, temescal=0;
   const inside = turf.pointsWithinPolygon(ptsFC, hex);
   inside.features.forEach(p=>{
-    const c = p.properties.count;
-    if (p.properties.store.includes('Albany')) albany+=c;
-    else if (p.properties.store.includes('Temescal')) temescal+=c;
+    const c = p.properties.count || 0;
+    const storeName = (p.properties.store || '').toString();
+    if (storeName.includes('Albany')) albany += c;
+    else if (storeName.includes('Temescal')) temescal += c;
+    else {
+      // If store name doesn't match either, you can choose a default allocation; for now add to total as neutral
+      // albany += 0; temescal += 0;
+    }
   });
-  hex.properties = {albany, temescal, total: albany+temescal};
+  hex.properties = {albany, temescal, total: albany + temescal};
   totals.push(hex.properties.total);
 });
 
 const maxTotal = Math.max(...totals, COLOR_THRESHOLD);
+console.log('Totals range:', Math.min(...totals), maxTotal);
 
-// Color scales start at 5 orders
-const albScale = chroma.scale(['#e6f0fa','#1f78b4']).domain([COLOR_THRESHOLD,maxTotal]);
-const temScale = chroma.scale(['#e6f5e9','#33a02c']).domain([COLOR_THRESHOLD,maxTotal]);
+// define color scales
+const albScale = chroma.scale(['#e6f0fa','#1f78b4']).domain([COLOR_THRESHOLD, Math.max(COLOR_THRESHOLD, maxTotal)]);
+const temScale = chroma.scale(['#e6f5e9','#33a02c']).domain([COLOR_THRESHOLD, Math.max(COLOR_THRESHOLD, maxTotal)]);
 
-// =====================
-// STYLE HEXES
-// =====================
+// STYLE hexes and set properties
 grid.features.forEach(hex=>{
   const {albany, temescal, total} = hex.properties;
-
   if (total >= COLOR_THRESHOLD){
     hex.properties.winner = albany >= temescal ? 'Albany' : 'Temescal';
-    hex.properties.fill =
-      hex.properties.winner === 'Albany'
-        ? albScale(total).hex()
-        : temScale(total).hex();
+    hex.properties.fill = hex.properties.winner === 'Albany' ? albScale(total).hex() : temScale(total).hex();
     hex.properties.opacity = 0.65;
   } else if (total >= 1){
     hex.properties.winner = albany >= temescal ? 'Albany' : 'Temescal';
-    hex.properties.fill =
-      hex.properties.winner === 'Albany'
-        ? '#e6f0fa'
-        : '#e6f5e9';
+    hex.properties.fill = hex.properties.winner === 'Albany' ? '#e6f0fa' : '#e6f5e9';
     hex.properties.opacity = 0.25;
   } else {
     hex.properties.winner = 'None';
+    // keep a tiny fill so hex outlines are visible
+    hex.properties.fill = '#ffffff';
+    hex.properties.opacity = 0.03;
   }
 });
 
-// =====================
 // RENDER
-// =====================
-const layer = L.geoJSON(grid,{
-  style:f=>{
+const layer = L.geoJSON(grid, {
+  style: function(f){
+    // draw all hexes faintly so structure is visible even where there's no volume
     if (f.properties.winner === 'None'){
-      return {color:'#ddd',weight:0.5,fillOpacity:0};
+      return {
+        color: '#ddd',
+        weight: 0.6,
+        fillColor: f.properties.fill,
+        fillOpacity: f.properties.opacity
+      };
     }
+    // data hexes (1+ orders)
     return {
-      color:'#555',
-      weight:0.6,
-      fillColor:f.properties.fill,
-      fillOpacity:f.properties.opacity
+      color: '#555',
+      weight: 0.6,
+      fillColor: f.properties.fill,
+      fillOpacity: f.properties.opacity
     };
   },
-  onEachFeature:(f,l)=>{
+  onEachFeature: function(f,l){
     l.bindTooltip(
       `<strong>${f.properties.winner}</strong><br>
        Albany: ${f.properties.albany}<br>
@@ -174,29 +201,36 @@ const layer = L.geoJSON(grid,{
   }
 }).addTo(map);
 
-map.fitBounds(layer.getBounds(),{padding:[20,20]});
-
-// =====================
-// LEGEND
-// =====================
-function buildLegend(scale, el){
-  el.innerHTML='';
-  const steps = 4;
-  for (let i=0;i<steps;i++){
-    const v = Math.round(COLOR_THRESHOLD + (i/(steps-1))*(maxTotal-COLOR_THRESHOLD));
-    const row=document.createElement('div');
-    row.className='row';
-    const sw=document.createElement('div');
-    sw.className='swatch';
-    sw.style.background = scale(v).hex();
-    row.appendChild(sw);
-    row.appendChild(document.createTextNode(v+'+ orders'));
-    el.appendChild(row);
+if (layer.getBounds && !layer.getBounds().isValid ? false : true) {
+  // fit if the layer has a valid bounds (guard against degenerate cases)
+  try {
+    const b = layer.getBounds();
+    if (b.isValid()) map.fitBounds(b, {padding:[20,20]});
+  } catch(e){
+    console.warn('Could not fit bounds:', e);
   }
 }
 
+// LEGEND builder
+function buildLegend(scale, el){
+  el.innerHTML = '';
+  const steps = 4;
+  for (let i=0;i<steps;i++){
+    const v = Math.round(COLOR_THRESHOLD + (i/(steps-1))*(maxTotal-COLOR_THRESHOLD));
+    const row = document.createElement('div');
+    row.className = 'row';
+    const sw = document.createElement('div');
+    sw.className = 'swatch';
+    sw.style.background = scale(v).hex();
+    row.appendChild(sw);
+    row.appendChild(document.createTextNode(v + '+ orders'));
+    el.appendChild(row);
+  }
+}
 buildLegend(albScale, document.getElementById('albLegend'));
 buildLegend(temScale, document.getElementById('temLegend'));
+
+console.log('Rendering complete. Hexes with total >= 1 are faintly shaded; >= 5 use color ramps.');
 </script>
 
 </body>
